@@ -1,16 +1,68 @@
-# React + Vite
+# BookApp
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Aplicacion Expo para Android con una pantalla de lectura en ingles.
 
-Currently, two official plugins are available:
+Funciones actuales:
+- lectura en pantalla completa con scroll
+- tap sobre una palabra
+- deteccion de la oracion completa a la que pertenece
+- traduccion real de la oracion con Google ML Kit en el dispositivo
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Stack actual
 
-## React Compiler
+- Expo SDK 54
+- React 19.1.0
+- React Native 0.81.5
+- `@react-native-ml-kit/translate-text`
+- `expo-dev-client`
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Importante
 
-## Expanding the ESLint configuration
+La traduccion con ML Kit usa codigo nativo. Por eso no funciona en Expo Go.
+Necesitas una development build de Android.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Instalar dependencias
+
+```bash
+npm install
+```
+
+## Generar proyecto nativo Android
+
+```bash
+npx expo prebuild --platform android
+```
+
+## Probar en Android
+
+Si tienes Android Studio o el SDK de Android configurado:
+
+```bash
+npm run android:dev
+```
+
+Eso compila e instala la app nativa de desarrollo en Android.
+
+Luego levanta Metro para esa app:
+
+```bash
+npm run start:dev
+```
+
+## Flujo de traduccion actual
+
+1. Tocas una palabra del texto.
+2. La app detecta la oracion completa.
+3. ML Kit traduce la oracion de ingles a espanol en el dispositivo.
+4. El modal muestra la palabra, la oracion original y la traduccion.
+
+## Archivos principales
+
+- `App.js`: pantalla de lectura, deteccion de oracion y llamada a ML Kit
+- `android/`: proyecto nativo generado por Expo prebuild
+- `app.json`: configuracion Expo
+- `package.json`: dependencias y scripts de desarrollo
+
+## Nota tecnica
+
+El paquete `@react-native-ml-kit/translate-text` indica en su README que todavia esta en alpha, asi que sirve para pruebas pero no conviene asumir estabilidad de produccion sin evaluarlo antes.
