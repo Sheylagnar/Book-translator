@@ -27,6 +27,16 @@ Necesitas una development build de Android.
 npm install
 ```
 
+## Configurar Google AI
+
+Crea un archivo `.env.local` con esta variable:
+
+```bash
+EXPO_PUBLIC_GOOGLE_AI_API_KEY=tu_api_key
+```
+
+Expo necesita reiniciarse para leer cambios en variables `EXPO_PUBLIC_*`.
+
 ## Generar proyecto nativo Android
 
 ```bash
@@ -52,9 +62,10 @@ npm run start:dev
 ## Flujo de traduccion actual
 
 1. Tocas una palabra del texto.
-2. La app detecta la oracion completa.
-3. ML Kit traduce la oracion de ingles a espanol en el dispositivo.
-4. El modal muestra la palabra, la oracion original y la traduccion.
+2. La app detecta la oracion completa y un snippet corto de contexto.
+3. En modo `ML Kit`, se traduce solo el fragmento cercano a la palabra.
+4. En modo `Google AI`, se consulta Gemini para obtener la traduccion completa de la oracion y la traduccion contextual de la palabra seleccionada.
+5. El modal muestra la palabra, el contexto original y la traduccion resultante.
 
 ## Archivos principales
 
