@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import {
+  AppState,
   BackHandler,
   Image,
   Platform,
@@ -27,7 +28,8 @@ const STORAGE_LIBRARY_KEY = 'bookapp.library.v2'
 const STORAGE_LAST_BOOK_ID_KEY = 'bookapp.lastBookId.v2'
 const STORAGE_THEME_MODE_KEY = 'bookapp.themeMode.v1'
 const STORAGE_FONT_SCALE_KEY = 'bookapp.fontScale.v1'
-const SAMPLE_BOOK_ID = 'sample-book'
+const ITALIC_START_MARKER = '[[ITALIC_START]]'
+const ITALIC_END_MARKER = '[[ITALIC_END]]'
 const FONT_SCALE_OPTIONS = {
   sm: { body: 15, lineHeight: 24, subhead: 16, subheadLineHeight: 25, label: 'A' },
   md: { body: 17, lineHeight: 27, subhead: 18, subheadLineHeight: 28, label: 'Aa' },
@@ -73,33 +75,6 @@ const DARK_THEME = {
   coverFallback: '#4f3d31',
   coverFallbackText: '#f0ddca',
 }
-const SAMPLE_READING_TEXT = `On quiet mornings, Emma liked to sit near the window and read one chapter before the city fully woke up. The soft light came through the curtains, the coffee slowly cooled beside her, and every paragraph felt like an open door to another life.
-
-She loved the way stories made ordinary moments feel larger. A simple train ride turned into an adventure. A short conversation opened up a secret. A rainy afternoon became the beginning of a memory worth keeping.
-
-One day, while reading in English, she began to look up unfamiliar expressions instead of skipping them. Some sentences seemed simple at first, but then a phrasal verb would show up and change the whole meaning. She wrote them down, read them out loud, and went over them again until they started to feel natural.
-
-That small habit changed the way she learned. Reading was no longer only about getting through a page. It became a slow and personal dialogue with language, one phrase at a time. When a sentence was difficult, she would slow down, break it down, and figure out why it worked.
-
-The room stayed silent except for the turning of pages and the distant sound of traffic outside. Emma underlined expressions she wanted to come back to, circled verbs she did not want to mix up, and smiled whenever a sentence came together without translation.
-
-Some days she moved quickly, almost flying through the lines. On other days she paused after every few words, letting them sink in before she carried on. If a paragraph did not make sense right away, she would go back, read it over, and try to work out the meaning from context.
-
-As the weeks went by, she started to pick up patterns she had missed before. She could point out when a character was showing off, when two friends had fallen out, or when someone was trying to cheer another person up. Little by little, the language stopped feeling far away and began to open up to her.`
-const SAMPLE_BOOK = {
-  id: SAMPLE_BOOK_ID,
-  title: 'Sample text',
-  sourceName: 'Built-in sample',
-  bookPath: '',
-  coverDataUri: '',
-  chapterCount: 1,
-  currentChapterIndex: 0,
-  currentPageIndex: 0,
-  lastScrollY: 0,
-  isSample: true,
-}
-
-const SAMPLE_CHAPTERS = [{ title: 'Sample text', text: SAMPLE_READING_TEXT, blocks: [{ type: 'text', text: SAMPLE_READING_TEXT }] }]
 const PHRASAL_VERBS = new Set([
   'break down',
   'carry on',
@@ -201,6 +176,55 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value]
 }
 
+async function persistLibrarySnapshot(library, currentBookId) {
+  const persistedLibrary = library.map(({ coverDataUri, ...book }) => book)
+
+  await Promise.all([
+    AsyncStorage.setItem(STORAGE_LIBRARY_KEY, JSON.stringify(persistedLibrary)),
+    AsyncStorage.setItem(STORAGE_LAST_BOOK_ID_KEY, currentBookId || ''),
+  ])
+}
+
+async function readBookPayloadFile(bookPath) {
+  const payloadText = await FileSystem.readAsStringAsync(bookPath)
+  return JSON.parse(payloadText)
+}
+
+async function restoreLibraryBooks(storedLibrary) {
+  return Promise.all(
+    storedLibrary.map(async (book) => {
+      if (!book?.bookPath) {
+        return {
+          currentPageIndex: 0,
+          ...book,
+          coverDataUri: book?.coverDataUri || '',
+        }
+      }
+
+      try {
+        const fileInfo = await FileSystem.getInfoAsync(book.bookPath)
+        if (!fileInfo.exists) {
+          return null
+        }
+
+        const payload = await readBookPayloadFile(book.bookPath)
+
+        return {
+          currentPageIndex: 0,
+          ...book,
+          coverDataUri: book?.coverDataUri || payload?.coverDataUri || '',
+        }
+      } catch {
+        return {
+          currentPageIndex: 0,
+          ...book,
+          coverDataUri: book?.coverDataUri || '',
+        }
+      }
+    }),
+  ).then((books) => books.filter(Boolean))
+}
+
 function normalizeWhitespace(text) {
   return text
     .replace(/\r/g, '')
@@ -246,6 +270,41 @@ function normalizeDecoratedHeading(text) {
   return normalized
 }
 
+function normalizeDecorativeOpeningParagraph(text) {
+  const normalized = normalizeWhitespace(String(text || ''))
+
+  if (!normalized) {
+    return ''
+  }
+
+  const words = normalized.split(' ')
+  if (words.length < 2) {
+    return normalized
+  }
+
+  const leadingDecorativeWords = []
+
+  for (const word of words) {
+    if (/^[A-Z][A-Z'-]*$/.test(word)) {
+      leadingDecorativeWords.push(word)
+      continue
+    }
+    break
+  }
+
+  if (leadingDecorativeWords.length < 2 || leadingDecorativeWords[0].length !== 1) {
+    return normalized
+  }
+
+  const firstNaturalWord = `${leadingDecorativeWords[0]}${leadingDecorativeWords[1].toLowerCase()}`
+  const remainingDecorativeWords = leadingDecorativeWords
+    .slice(2)
+    .map((word) => word.toLowerCase())
+  const remainingWords = words.slice(leadingDecorativeWords.length)
+
+  return [firstNaturalWord, ...remainingDecorativeWords, ...remainingWords].join(' ')
+}
+
 function isLikelySubhead(paragraph) {
   const normalized = normalizeWhitespace(String(paragraph || ''))
 
@@ -279,6 +338,8 @@ function stripHtmlToText(html) {
       html
         .replace(/<script[\s\S]*?<\/script>/gi, ' ')
         .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<(?:i|em)\b[^>]*>/gi, ` ${ITALIC_START_MARKER} `)
+        .replace(/<\/(?:i|em)>/gi, ` ${ITALIC_END_MARKER} `)
         .replace(/<sup[^>]*>\s*(?:<a[^>]*>)?\s*([^<\s]+)\s*(?:<\/a>)?\s*<\/sup>/gi, ' [[REF:$1]] ')
         .replace(/<br\s*\/?>/gi, '\n')
         .replace(/<\/(p|div|section|article|h1|h2|h3|h4|h5|h6|li|blockquote|tr)>/gi, '\n')
@@ -286,6 +347,123 @@ function stripHtmlToText(html) {
         .replace(/<[^>]+>/g, ' '),
     ),
   )
+}
+
+function stripInlineFormatMarkers(text) {
+  return String(text || '')
+    .replaceAll(ITALIC_START_MARKER, '')
+    .replaceAll(ITALIC_END_MARKER, '')
+    .replace(/ {2,}/g, ' ')
+}
+
+function getEmbeddedCssBlocks(html) {
+  return [...String(html || '').matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)]
+    .map((match) => match[1])
+    .filter(Boolean)
+}
+
+function getLinkedStylesheetPaths(html, chapterPath) {
+  return [...String(html || '').matchAll(/<link\b[^>]*href=["']([^"']+)["'][^>]*>/gi)]
+    .filter((match) => /rel=["'][^"']*stylesheet[^"']*["']/i.test(match[0]))
+    .map((match) => stripFragment(resolveRelativePath(chapterPath, match[1])))
+}
+
+function extractItalicClassNamesFromCss(cssText) {
+  const italicClassNames = new Set()
+  const normalizedCss = String(cssText || '').replace(/\/\*[\s\S]*?\*\//g, ' ')
+  const ruleRegex = /([^{}]+)\{([^{}]+)\}/g
+  let match
+
+  while ((match = ruleRegex.exec(normalizedCss)) !== null) {
+    const selectors = match[1]
+    const body = match[2]
+
+    if (!/font-style\s*:\s*(italic|oblique)/i.test(body)) {
+      continue
+    }
+
+    for (const classMatch of selectors.matchAll(/\.([A-Za-z0-9_-]+)/g)) {
+      italicClassNames.add(classMatch[1].toLowerCase())
+    }
+  }
+
+  return italicClassNames
+}
+
+async function getItalicFormattingHints({ html, chapterPath, zip }) {
+  const italicClassNames = new Set()
+  const cssSources = [...getEmbeddedCssBlocks(html)]
+  const stylesheetPaths = getLinkedStylesheetPaths(html, chapterPath)
+
+  for (const stylesheetPath of stylesheetPaths) {
+    const stylesheetFile = zip.file(stylesheetPath)
+    if (!stylesheetFile) {
+      continue
+    }
+
+    try {
+      cssSources.push(await stylesheetFile.async('string'))
+    } catch {}
+  }
+
+  cssSources.forEach((cssText) => {
+    extractItalicClassNamesFromCss(cssText).forEach((className) => {
+      italicClassNames.add(className)
+    })
+  })
+
+  return { italicClassNames }
+}
+
+function hasKnownItalicClass(html, italicClassNames) {
+  if (!italicClassNames || italicClassNames.size === 0) {
+    return false
+  }
+
+  const classMatches = [...String(html || '').matchAll(/class=["']([^"']+)["']/gi)]
+
+  return classMatches.some((match) =>
+    match[1]
+      .split(/\s+/)
+      .filter(Boolean)
+      .some((className) => italicClassNames.has(className.toLowerCase())),
+  )
+}
+
+function tagShouldBeItalic(openingTag, italicClassNames) {
+  const normalized = String(openingTag || '').toLowerCase()
+
+  if (!normalized) {
+    return false
+  }
+
+  return (
+    /^<(i|em|cite|blockquote)\b/.test(normalized) ||
+    /style=["'][^"']*font-style\s*:\s*(italic|oblique)/.test(normalized) ||
+    /class=["'][^"']*\b(italic|emphasis|poem|verse|stanza|citation|quote)\b/.test(normalized) ||
+    hasKnownItalicClass(normalized, italicClassNames)
+  )
+}
+
+function annotateItalicElements(html, italicClassNames) {
+  let annotatedHtml = String(html || '')
+  const tagsToWrap = ['span', 'p', 'div', 'blockquote', 'cite']
+
+  tagsToWrap.forEach((tagName) => {
+    const regex = new RegExp(`<${tagName}\\b([^>]*)>([\\s\\S]*?)<\\/${tagName}>`, 'gi')
+
+    annotatedHtml = annotatedHtml.replace(regex, (fullMatch, attributes, innerHtml) => {
+      const openingTag = `<${tagName}${attributes}>`
+
+      if (!tagShouldBeItalic(openingTag, italicClassNames)) {
+        return fullMatch
+      }
+
+      return `${openingTag}${ITALIC_START_MARKER}${innerHtml}${ITALIC_END_MARKER}</${tagName}>`
+    })
+  })
+
+  return annotatedHtml
 }
 
 function guessMediaTypeFromPath(filePath) {
@@ -308,6 +486,7 @@ function guessMediaTypeFromPath(filePath) {
 }
 
 async function extractBlocksFromHtml({ html, chapterPath, zip, mediaTypeByPath }) {
+  const italicHints = await getItalicFormattingHints({ html, chapterPath, zip })
   const sanitizedHtml = html
     .replace(/<head[\s\S]*?<\/head>/gi, ' ')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -319,26 +498,32 @@ async function extractBlocksFromHtml({ html, chapterPath, zip, mediaTypeByPath }
   let match
 
   function pushTextFragment(fragmentHtml) {
-    const normalizedFragment = fragmentHtml
+    const normalizedFragment = annotateItalicElements(
+      fragmentHtml
       .replace(/<p[^>]*class=["'][^"']*subhead[^"']*["'][^>]*>([\s\S]*?)<\/p>/gi, (_, innerHtml) => `\n\n${normalizeDecoratedHeading(innerHtml)}\n\n` )
+      ,
+      italicHints.italicClassNames,
+    )
 
     splitIntoParagraphs(stripHtmlToText(normalizedFragment)).forEach((paragraph) => {
+      const normalizedParagraph = normalizeDecorativeOpeningParagraph(paragraph)
+
       if (!paragraph) {
         return
       }
 
-      const subheadMatch = paragraph.match(/^\[\[SUBHEAD:(.*)\]\]$/)
+      const subheadMatch = normalizedParagraph.match(/^\[\[SUBHEAD:(.*)\]\]$/)
       if (subheadMatch) {
-        blocks.push({ type: 'subhead', text: subheadMatch[1].trim() })
+        blocks.push({ type: 'subhead', text: subheadMatch[1].trim(), isItalic: false })
         return
       }
 
-      if (isLikelySubhead(paragraph)) {
-        blocks.push({ type: 'subhead', text: paragraph })
+      if (isLikelySubhead(normalizedParagraph)) {
+        blocks.push({ type: 'subhead', text: normalizedParagraph, isItalic: false })
         return
       }
 
-      blocks.push({ type: 'text', text: paragraph })
+      blocks.push({ type: 'text', text: normalizedParagraph, isItalic: false })
     })
   }
 
@@ -354,6 +539,7 @@ async function extractBlocksFromHtml({ html, chapterPath, zip, mediaTypeByPath }
       blocks.push({
         type: 'image',
         uri: `data:${mediaTypeByPath.get(imagePath) || guessMediaTypeFromPath(imagePath)};base64,${imageBase64}`,
+        isItalic: false,
       })
     }
 
@@ -363,7 +549,7 @@ async function extractBlocksFromHtml({ html, chapterPath, zip, mediaTypeByPath }
   const trailingFragment = sanitizedHtml.slice(lastIndex)
   pushTextFragment(trailingFragment)
 
-  return blocks.length > 0 ? blocks : [{ type: 'text', text: normalizeWhitespace(stripHtmlToText(html)) }]
+  return blocks.length > 0 ? blocks : [{ type: 'text', text: normalizeWhitespace(stripHtmlToText(html)), isItalic: false }]
 }
 
 function splitIntoChapterChunks(text, maxChars = 9000) {
@@ -1150,12 +1336,23 @@ function buildReadingItems(text, idPrefix = '') {
   const sentenceMatches = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? []
 
   sentenceMatches.forEach((sentence, sentenceIndex) => {
-    const sentenceText = sentence.trim()
-    const sentenceTokens = sentence.split(/(\[\[REF:[^\]]+\]\]|\s+)/)
+    const sentenceText = normalizeWhitespace(stripInlineFormatMarkers(sentence))
+    const sentenceTokens = sentence.split(/(\[\[REF:[^\]]+\]\]|\[\[ITALIC_(?:START|END)\]\]|\s+)/)
     const wordEntries = []
     let wordIndexInSentence = 0
+    let isItalicActive = false
 
     sentenceTokens.forEach((token, tokenIndex) => {
+      if (token === ITALIC_START_MARKER) {
+        isItalicActive = true
+        return
+      }
+
+      if (token === ITALIC_END_MARKER) {
+        isItalicActive = false
+        return
+      }
+
       const referenceMatch = token.match(/^\[\[REF:(.+)\]\]$/)
       if (referenceMatch) {
         wordEntries.push({
@@ -1165,6 +1362,7 @@ function buildReadingItems(text, idPrefix = '') {
           lemma: '',
           wordIndexInSentence,
           isReference: true,
+          isItalic: isItalicActive,
         })
         return
       }
@@ -1180,6 +1378,7 @@ function buildReadingItems(text, idPrefix = '') {
         normalizedWord: normalizeWord(token),
         lemma: lemmatizeVerb(token),
         wordIndexInSentence,
+        isItalic: isItalicActive,
       })
       wordIndexInSentence += 1
     })
@@ -1201,7 +1400,7 @@ function buildReadingItems(text, idPrefix = '') {
 
       phraseStarts.set(currentWord.tokenIndex, {
         id: `${idPrefix}${sentenceIndex}-${currentWord.tokenIndex}-${nextWord.tokenIndex}`,
-        token: sentenceTokens.slice(currentWord.tokenIndex, nextWord.tokenIndex + 1).join(''),
+        token: stripInlineFormatMarkers(sentenceTokens.slice(currentWord.tokenIndex, nextWord.tokenIndex + 1).join('')),
         sentence: sentenceText,
         selectionText: `${currentWord.word} ${nextWord.word}`,
         word: `${currentWord.word} ${nextWord.word}`,
@@ -1212,6 +1411,7 @@ function buildReadingItems(text, idPrefix = '') {
         localPhrasalVerb: candidate,
         localBaseVerb: currentWord.lemma,
         localParticle: nextWord.normalizedWord,
+        isItalic: currentWord.isItalic || nextWord.isItalic,
       })
 
       coveredWordIndexes.add(index)
@@ -1235,11 +1435,26 @@ function buildReadingItems(text, idPrefix = '') {
           localPhrasalVerb: '',
           localBaseVerb: entry.lemma,
           localParticle: '',
+          isItalic: entry.isItalic,
         },
       ]),
     )
 
+    isItalicActive = false
+
     for (let tokenIndex = 0; tokenIndex < sentenceTokens.length; tokenIndex += 1) {
+      const token = sentenceTokens[tokenIndex]
+
+      if (token === ITALIC_START_MARKER) {
+        isItalicActive = true
+        continue
+      }
+
+      if (token === ITALIC_END_MARKER) {
+        isItalicActive = false
+        continue
+      }
+
       const phraseItem = phraseStarts.get(tokenIndex)
       if (phraseItem) {
         items.push(phraseItem)
@@ -1258,13 +1473,14 @@ function buildReadingItems(text, idPrefix = '') {
 
       items.push({
         id: `${idPrefix}${sentenceIndex}-${tokenIndex}`,
-        token: sentenceTokens[tokenIndex],
+        token,
         sentence: sentenceText,
         word: '',
         selectionText: '',
         selectionType: 'text',
         wordIndexInSentence: -1,
         selectedWordCount: 0,
+        isItalic: isItalicActive,
       })
     }
   })
@@ -1290,27 +1506,26 @@ function LibraryCard({ book, onPress, onDelete, theme }) {
           <Text style={[styles.bookProgress, { color: theme.textSoft }]}>Page {(book.currentPageIndex || 0) + 1}</Text>
         </View>
       </Pressable>
-      {!book.isSample ? (
-        <Pressable onPress={onDelete} style={[styles.deleteBookButton, { backgroundColor: theme.dangerSurface }]}>
-          <Text style={[styles.deleteBookButtonText, { color: theme.dangerText }]}>Delete</Text>
-        </Pressable>
-      ) : null}
+      <Pressable onPress={onDelete} style={[styles.deleteBookButton, { backgroundColor: theme.dangerSurface }]}>
+        <Text style={[styles.deleteBookButtonText, { color: theme.dangerText }]}>Delete</Text>
+      </Pressable>
     </View>
   )
 }
 
 export default function App() {
   const readerScrollRef = useRef(null)
+  const appStateRef = useRef(AppState.currentState)
   const [screen, setScreen] = useState('library')
   const [selectedMode, setSelectedMode] = useState('ml-kit')
-  const [books, setBooks] = useState([SAMPLE_BOOK])
+  const [books, setBooks] = useState([])
   const [isHydrated, setIsHydrated] = useState(false)
-  const [currentBookId, setCurrentBookId] = useState(SAMPLE_BOOK_ID)
-  const [bookChapters, setBookChapters] = useState(SAMPLE_CHAPTERS)
+  const [currentBookId, setCurrentBookId] = useState('')
+  const [bookChapters, setBookChapters] = useState([])
   const [currentChapterIndex, setCurrentChapterIndex] = useState(0)
   const [currentPageIndex, setCurrentPageIndex] = useState(0)
-  const [readingText, setReadingText] = useState(SAMPLE_CHAPTERS[0].text)
-  const [bookLabel, setBookLabel] = useState(SAMPLE_BOOK.title)
+  const [readingText, setReadingText] = useState('')
+  const [bookLabel, setBookLabel] = useState('')
   const [importStatus, setImportStatus] = useState('idle')
   const [importError, setImportError] = useState('')
   const [themeMode, setThemeMode] = useState('light')
@@ -1346,7 +1561,7 @@ export default function App() {
   const theme = themeMode === 'dark' ? DARK_THEME : LIGHT_THEME
   const fontMetrics = FONT_SCALE_OPTIONS[fontScale] || FONT_SCALE_OPTIONS.md
 
-  const chapterEntry = bookChapters[currentChapterIndex] || SAMPLE_CHAPTERS[0]
+  const chapterEntry = bookChapters[currentChapterIndex] || { title: '', text: '', blocks: [] }
   const chapterTitle = chapterEntry?.title || getChapterHeading(readingText) || `Chapter ${currentChapterIndex + 1}`
   const chapterPages = useMemo(() => splitChapterEntryIntoPages(chapterEntry), [chapterEntry])
   const currentPageBlocks = chapterPages[currentPageIndex] || chapterPages[0] || []
@@ -1368,6 +1583,7 @@ export default function App() {
         return {
           id: `paragraph-${blockIndex}`,
           type: block.type === 'subhead' ? 'subhead' : 'text',
+          isItalic: Boolean(block.isItalic),
           items: buildReadingItems(textValue, `p${blockIndex}-`),
         }
       }).filter((block) => block.type === 'image' || block.items.length > 0),
@@ -1384,12 +1600,9 @@ export default function App() {
           AsyncStorage.getItem(STORAGE_FONT_SCALE_KEY),
         ])
         const parsedLibrary = storedLibrary ? JSON.parse(storedLibrary) : []
-        const normalizedLibrary = parsedLibrary.map((book) => ({
-          currentPageIndex: 0,
-          ...book,
-        }))
-        setBooks(normalizedLibrary.length > 0 ? [SAMPLE_BOOK, ...normalizedLibrary] : [SAMPLE_BOOK])
-        setCurrentBookId(storedLastBookId || SAMPLE_BOOK_ID)
+        const normalizedLibrary = await restoreLibraryBooks(parsedLibrary)
+        setBooks(normalizedLibrary)
+        setCurrentBookId(storedLastBookId || '')
         if (storedThemeMode === 'dark' || storedThemeMode === 'light') {
           setThemeMode(storedThemeMode)
         }
@@ -1409,9 +1622,8 @@ export default function App() {
       return
     }
 
-    const persistableBooks = books.filter((book) => !book.isSample)
-    AsyncStorage.setItem(STORAGE_LIBRARY_KEY, JSON.stringify(persistableBooks)).catch(() => {})
-  }, [books, isHydrated])
+    persistLibrarySnapshot(books, currentBookId).catch(() => {})
+  }, [books, currentBookId, isHydrated])
 
   useEffect(() => {
     if (!isHydrated) {
@@ -1436,6 +1648,23 @@ export default function App() {
 
     AsyncStorage.setItem(STORAGE_FONT_SCALE_KEY, fontScale).catch(() => {})
   }, [fontScale, isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
+
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      const previousAppState = appStateRef.current
+      appStateRef.current = nextAppState
+
+      if (previousAppState === 'active' && nextAppState !== 'active') {
+        persistLibrarySnapshot(books, currentBookId).catch(() => {})
+      }
+    })
+
+    return () => subscription.remove()
+  }, [books, currentBookId, isHydrated])
 
   useEffect(() => {
     if (screen !== 'reader' || pendingRestoreScrollY <= 0 || !readerScrollRef.current) {
@@ -1491,12 +1720,7 @@ export default function App() {
   }
 
   async function loadBookPayload(book) {
-    if (book.isSample) {
-      return { chapterEntries: SAMPLE_CHAPTERS }
-    }
-
-    const payloadText = await FileSystem.readAsStringAsync(book.bookPath)
-    return JSON.parse(payloadText)
+    return readBookPayloadFile(book.bookPath)
   }
 
   async function openBook(book) {
@@ -1511,7 +1735,7 @@ export default function App() {
     const payload = await loadBookPayload(book)
     const chapterEntries = payload.chapterEntries?.length
       ? payload.chapterEntries
-      : (payload.chapters || [SAMPLE_READING_TEXT]).map((chapterText, index) => ({
+      : (payload.chapters || []).map((chapterText, index) => ({
           title: `Chapter ${index + 1}`,
           text: chapterText,
           blocks: [{ type: 'text', text: chapterText }],
@@ -1528,16 +1752,22 @@ export default function App() {
   }
 
   function updateBookProgress(patch) {
-    setBooks((currentBooks) =>
-      currentBooks.map((book) =>
+    setBooks((currentBooks) => {
+      const nextBooks = currentBooks.map((book) =>
         book.id === currentBookId
           ? {
               ...book,
               ...patch,
             }
           : book,
-      ),
-    )
+      )
+
+      if (isHydrated) {
+        persistLibrarySnapshot(nextBooks, currentBookId).catch(() => {})
+      }
+
+      return nextBooks
+    })
   }
 
   function saveCurrentProgressAndGoBack() {
@@ -1555,7 +1785,7 @@ export default function App() {
   async function handleDeleteBook(bookId) {
     const bookToDelete = books.find((book) => book.id === bookId)
 
-    if (!bookToDelete || bookToDelete.isSample) {
+    if (!bookToDelete) {
       return
     }
 
@@ -1568,10 +1798,17 @@ export default function App() {
       }
     } catch {}
 
-    setBooks((currentBooks) => currentBooks.filter((book) => book.id !== bookId))
+    const nextCurrentBookId = currentBookId === bookId ? '' : currentBookId
+    const nextBooks = books.filter((book) => book.id !== bookId)
+
+    setBooks(nextBooks)
 
     if (currentBookId === bookId) {
-      setCurrentBookId(SAMPLE_BOOK_ID)
+      setCurrentBookId('')
+    }
+
+    if (isHydrated) {
+      await persistLibrarySnapshot(nextBooks, nextCurrentBookId)
     }
   }
 
@@ -1597,7 +1834,13 @@ export default function App() {
       const bookId = `book-${Date.now()}`
       const bookPath = `${booksDir}/${bookId}.json`
 
-      await FileSystem.writeAsStringAsync(bookPath, JSON.stringify({ chapterEntries: extracted.chapterEntries }))
+      await FileSystem.writeAsStringAsync(
+        bookPath,
+        JSON.stringify({
+          chapterEntries: extracted.chapterEntries,
+          coverDataUri: extracted.coverDataUri,
+        }),
+      )
 
       const nextBook = {
         id: bookId,
@@ -1612,7 +1855,11 @@ export default function App() {
         isSample: false,
       }
 
-      setBooks((currentBooks) => [nextBook, ...currentBooks.filter((book) => book.id !== nextBook.id)])
+      const nextBooks = [nextBook, ...books.filter((book) => book.id !== nextBook.id)]
+
+      setBooks(nextBooks)
+      setCurrentBookId(nextBook.id)
+      await persistLibrarySnapshot(nextBooks, nextBook.id)
       setImportStatus('success')
       await openBook(nextBook)
     } catch (error) {
@@ -1870,7 +2117,14 @@ export default function App() {
               {block.items.map((item) => {
                 if (item.selectionType === 'reference') {
                   return (
-                    <Text key={item.id} style={[styles.referenceText, { color: theme.textSoft }]}>
+                    <Text
+                      key={item.id}
+                      style={[
+                        styles.referenceText,
+                        { color: theme.textSoft },
+                        item.isItalic ? styles.italicText : null,
+                      ]}
+                    >
                       {item.token}
                     </Text>
                   )
@@ -1886,6 +2140,7 @@ export default function App() {
                         block.type === 'subhead'
                           ? { fontSize: fontMetrics.subhead, lineHeight: fontMetrics.subheadLineHeight }
                           : { fontSize: fontMetrics.body, lineHeight: fontMetrics.lineHeight },
+                        block.isItalic || item.isItalic ? styles.italicText : null,
                       ]}
                     >
                       {item.token}
@@ -1909,6 +2164,7 @@ export default function App() {
                         item.selectionType === 'phrasal_verb'
                           ? [styles.phrasalWord, { textDecorationColor: theme.accent }]
                           : null,
+                        block.isItalic || item.isItalic ? styles.italicText : null,
                       ]}
                     >
                       {item.token}
@@ -1996,15 +2252,24 @@ export default function App() {
           {importStatus === 'error' ? <Text style={[styles.importError, { color: theme.error }]}>{importError}</Text> : null}
 
           <View style={styles.bookGrid}>
-            {books.map((book) => (
-              <LibraryCard
-                key={book.id}
-                book={book}
-                onPress={() => openBook(book)}
-                onDelete={() => handleDeleteBook(book.id)}
-                theme={theme}
-              />
-            ))}
+            {books.length > 0 ? (
+              books.map((book) => (
+                <LibraryCard
+                  key={book.id}
+                  book={book}
+                  onPress={() => openBook(book)}
+                  onDelete={() => handleDeleteBook(book.id)}
+                  theme={theme}
+                />
+              ))
+            ) : (
+              <View style={[styles.emptyLibraryCard, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+                <Text style={[styles.emptyLibraryTitle, { color: theme.text }]}>No books yet</Text>
+                <Text style={[styles.emptyLibraryText, { color: theme.textMuted }]}>
+                  Import an EPUB file to start reading here.
+                </Text>
+              </View>
+            )}
           </View>
 
           <View style={styles.libraryBottomControls}>
@@ -2531,6 +2796,23 @@ const styles = StyleSheet.create({
   bookGrid: {
     gap: 14,
   },
+  emptyLibraryCard: {
+    borderRadius: 20,
+    padding: 18,
+    backgroundColor: '#fff7ef',
+    borderWidth: 1,
+    borderColor: '#e1d1bf',
+  },
+  emptyLibraryTitle: {
+    marginBottom: 6,
+    fontSize: 18,
+    fontWeight: '800',
+    lineHeight: 22,
+  },
+  emptyLibraryText: {
+    fontSize: 14,
+    lineHeight: 21,
+  },
   bookCard: {
     gap: 12,
     borderRadius: 20,
@@ -2675,6 +2957,9 @@ const styles = StyleSheet.create({
     color: '#8b6649',
     fontSize: 10,
     lineHeight: 16,
+  },
+  italicText: {
+    fontStyle: 'italic',
   },
   phrasalWord: {
     textDecorationLine: 'underline',
